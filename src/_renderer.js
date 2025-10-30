@@ -127,8 +127,8 @@ window._loadTheme = theme => {
     }
 
     * {
-   	   ${(window.settings.nocursorOverride || window.settings.nocursor) ? "cursor: none !important;" : ""}
-	}
+          ${(window.settings.nocursorOverride || window.settings.nocursor) ? "cursor: none !important;" : ""}
+    }
 
     ${window._purifyCSS(theme.injectCSS || "")}
     </style>`;
@@ -244,6 +244,7 @@ function displayLine() {
     switch(true) {
         case i === 2:
             bootScreen.innerHTML += `eDEX-UI Kernel version ${electron.remote.app.getVersion()} boot at ${Date().toString()}; root:xnu-1699.22.73~1/RELEASE_X86_64`;
+            break;
         case i === 4:
             setTimeout(displayLine, 500);
             break;
@@ -590,7 +591,7 @@ window.openSettings = async () => {
     if (document.getElementById("settingsEditor")) return;
 
     // Build lists of available keyboards, themes, monitors
-    let keyboards, themes, monitors, ifaces;
+    let keyboards = "", themes = "", monitors = "", ifaces = "";
     fs.readdirSync(keyboardsDir).forEach(kb => {
         if (!kb.endsWith(".json")) return;
         kb = kb.replace(".json", "");
@@ -820,7 +821,7 @@ window.writeFile = (path) => {
 };
 
 window.writeSettingsFile = () => {
-    window.settings = {
+    const updatedSettings = {
         shell: document.getElementById("settingsEditor-shell").value,
         shellArgs: document.getElementById("settingsEditor-shellArgs").value,
         cwd: document.getElementById("settingsEditor-cwd").value,
@@ -848,6 +849,18 @@ window.writeSettingsFile = () => {
         experimentalGlobeFeatures: (document.getElementById("settingsEditor-experimentalGlobeFeatures").value === "true"),
         experimentalFeatures: (document.getElementById("settingsEditor-experimentalFeatures").value === "true")
     };
+
+    if (updatedSettings.port < 1024 || updatedSettings.port > 65535) {
+        document.getElementById("settingsEditorStatus").innerText = "Port value out of range (1024-65535).";
+        return;
+    }
+
+    if (updatedSettings.shellArgs && updatedSettings.shellArgs.length > 1024) {
+        document.getElementById("settingsEditorStatus").innerText = "Shell arguments too long.";
+        return;
+    }
+
+    window.settings = updatedSettings;
 
     Object.keys(window.settings).forEach(key => {
         if (window.settings[key] === "undefined") {

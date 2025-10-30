@@ -42,17 +42,36 @@ if (cluster.isMaster) {
     }
 
     var queue = {};
+    const allowedSiMethods = [
+        'time', 'cpuCurrentSpeed', 'cpuTemperature', 'currentLoad', 'mem', 
+        'battery', 'graphics', 'networkInterfaces', 'networkStats', 
+        'fsSize', 'blockDevices', 'processes', 'versions', 'system',
+        'osInfo', 'networkConnections'
+    ];
+    
     ipc.on("systeminformation-call", (e, type, id, ...args) => {
-        if (!si[type]) {
-            signale.warn("Illegal request for systeminformation");
+        if (typeof type !== 'string' || !allowedSiMethods.includes(type) || !si[type]) {
+            signale.warn("Illegal request for systeminformation:", type);
+            return;
+        }
+
+        if (typeof id !== 'string' || id.length > 50) {
+            signale.warn("Invalid systeminformation ID");
+            return;
+        }
+
+        if (Object.keys(queue).length > 100) {
+            signale.warn("Queue limit reached, dropping request");
             return;
         }
 
         if (args.length > 1 || workers.length <= 0) {
             si[type](...args).then(res => {
-                if (e.sender) {
+                if (e.sender && !e.sender.isDestroyed()) {
                     e.sender.send("systeminformation-reply-"+id, res);
                 }
+            }).catch(err => {
+                signale.error("systeminformation error:", err);
             });
         } else {
             queue[id] = e.sender;
@@ -61,14 +80,16 @@ if (cluster.isMaster) {
     });
 
     cluster.on("message", (worker, msg) => {
-        msg = JSON.parse(msg);
         try {
-            if (!queue[msg.id].isDestroyed()) {
+            msg = JSON.parse(msg);
+            if (msg && msg.id && queue[msg.id] && !queue[msg.id].isDestroyed()) {
                 queue[msg.id].send("systeminformation-reply-"+msg.id, msg.res);
+                delete queue[msg.id];
+            } else {
                 delete queue[msg.id];
             }
         } catch(e) {
-            // Window has been closed, ignore.
+            signale.error("Error parsing cluster message:", e);
         }
     });
 } else if (cluster.isWorker) {
@@ -78,12 +99,20 @@ if (cluster.isMaster) {
     signale.info("Multithread worker started at "+process.pid);
 
     process.on("message", msg => {
-        msg = JSON.parse(msg);
-        si[msg.type](msg.arg).then(res => {
-            process.send(JSON.stringify({
-                id: msg.id,
-                res
-            }));
-        });
+        try {
+            msg = JSON.parse(msg);
+            if (msg && msg.type && msg.id && typeof si[msg.type] === 'function') {
+                si[msg.type](msg.arg).then(res => {
+                    process.send(JSON.stringify({
+                        id: msg.id,
+                        res
+                    }));
+                }).catch(err => {
+                    signale.error("Worker error:", err);
+                });
+            }
+        } catch(e) {
+            signale.error("Worker message parse error:", e);
+        }
     });
 }

@@ -13,6 +13,10 @@ class Terminal {
             this.port = opts.port || 3000;
             this.cwd = "";
             this.oncwdchange = () => {};
+            this.authToken = this.Ipc.sendSync("terminal-auth-token", this.port);
+            if (!this.authToken) {
+                throw new Error("Missing authentication token for terminal connection on port " + this.port);
+            }
 
             this._sendSizeToServer = () => {
                 let cols = this.term.cols.toString();
@@ -176,7 +180,8 @@ class Terminal {
             let sockHost = opts.host || "127.0.0.1";
             let sockPort = this.port;
 
-            this.socket = new WebSocket("ws://"+sockHost+":"+sockPort);
+            const wsUrl = "ws://"+sockHost+":"+sockPort+"?token="+encodeURIComponent(this.authToken);
+            this.socket = new WebSocket(wsUrl);
             this.socket.onopen = () => {
                 let attachAddon = new AttachAddon(this.socket);
                 this.term.loadAddon(attachAddon);
@@ -304,9 +309,13 @@ class Terminal {
             this.Pty = require("node-pty");
             this.Websocket = require("ws").Server;
             this.Ipc = require("electron").ipcMain;
+            const {URL} = require("url");
 
             this.renderer = null;
             this.port = opts.port || 3000;
+            this.host = opts.host || "127.0.0.1";
+            this.authToken = opts.authToken || null;
+            this._clientConnected = false;
 
             this._closed = false;
             this.onclosed = () => {};
@@ -419,17 +428,36 @@ class Terminal {
                 this.onclosed(code, signal);
             });
 
-            this.wss = new this.Websocket({
+            const wsServer = new this.Websocket({
                 port: this.port,
+                host: this.host,
                 clientTracking: true,
                 verifyClient: info => {
-                    if (this.wss.clients.length >= 1) {
+                    if (this._clientConnected) {
                         return false;
-                    } else {
-                        return true;
                     }
+                    const origin = info.origin || info.req.headers.origin;
+                    if (origin && !origin.includes('localhost') && !origin.includes('127.0.0.1') && !origin.startsWith('file://')) {
+                        console.error('WebSocket connection rejected from origin:', origin);
+                        return false;
+                    }
+                    if (this.authToken) {
+                        try {
+                            const url = new URL(info.req.url, 'ws://localhost');
+                            const token = url.searchParams.get('token');
+                            if (token !== this.authToken) {
+                                console.error('WebSocket connection rejected: invalid auth token');
+                                return false;
+                            }
+                        } catch (e) {
+                            console.error('WebSocket URL parse error:', e);
+                            return false;
+                        }
+                    }
+                    return true;
                 }
             });
+            this.wss = wsServer;
             this.Ipc.on("terminal_channel-"+this.port, (e, ...args) => {
                 switch(args[0]) {
                     case "Renderer startup":
@@ -456,8 +484,10 @@ class Terminal {
                 }
             });
             this.wss.on("connection", ws => {
+                this._clientConnected = true;
                 this.onopened(this.tty._pid);
                 ws.on("close", (code, reason) => {
+                    this._clientConnected = false;
                     this.ondisconnected(code, reason);
                 });
                 ws.on("message", msg => {

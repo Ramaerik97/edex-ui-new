@@ -36,10 +36,23 @@ const path = require("path");
 const url = require("url");
 const fs = require("fs");
 const which = require("which");
+const crypto = require("crypto");
 const Terminal = require("./classes/terminal.class.js").Terminal;
 
+const terminalTokens = new Map();
+
 ipc.on("log", (e, type, content) => {
-    signale[type](content);
+    const allowedLogTypes = ['fatal', 'error', 'warn', 'note', 'info', 'success', 'debug', 'pending', 'complete', 'start', 'watch'];
+    if (typeof type === 'string' && allowedLogTypes.includes(type) && typeof content === 'string') {
+        signale[type](content);
+    } else {
+        signale.warn("Invalid log IPC message received");
+    }
+});
+
+ipc.on("terminal-auth-token", (event, port) => {
+    const token = terminalTokens.get(Number(port));
+    event.returnValue = token || null;
 });
 
 var win, tty, extraTtys;
@@ -157,12 +170,12 @@ const versionHistoryPath = path.join(electron.app.getPath("userData"), "versions
 var versionHistory = fs.existsSync(versionHistoryPath) ? require(versionHistoryPath) : {};
 var version = app.getVersion();
 if (typeof versionHistory[version] === "undefined") {
-	versionHistory[version] = {
-		firstSeen: Date.now(),
-		lastSeen: Date.now()
-	};
+    versionHistory[version] = {
+        firstSeen: Date.now(),
+        lastSeen: Date.now()
+    };
 } else {
-	versionHistory[version].lastSeen = Date.now();
+    versionHistory[version].lastSeen = Date.now();
 }
 fs.writeFileSync(versionHistoryPath, JSON.stringify(versionHistory, 0, 2), {encoding:"utf-8"});
 
@@ -192,14 +205,19 @@ function createWindow(settings) {
         backgroundColor: '#000000',
         webPreferences: {
             devTools: true,
-	    enableRemoteModule: true,
+        enableRemoteModule: true,
             contextIsolation: false,
             backgroundThrottling: false,
             webSecurity: true,
             nodeIntegration: true,
             nodeIntegrationInSubFrames: false,
+            nodeIntegrationInWorker: false,
             allowRunningInsecureContent: false,
-            experimentalFeatures: settings.experimentalFeatures || false
+            experimentalFeatures: settings.experimentalFeatures || false,
+            sandbox: false,
+            enableWebSQL: false,
+            safeDialogs: true,
+            safeDialogsMessage: "Prevented multiple dialogs"
         }
     });
 
@@ -240,18 +258,24 @@ app.on('ready', async () => {
         TERM_PROGRAM_VERSION: app.getVersion()
     }, settings.env);
 
-    signale.pending(`Creating new terminal process on port ${settings.port || '3000'}`);
+    const mainPort = Number(settings.port) || 3000;
+    signale.pending(`Creating new terminal process on port ${mainPort}`);
+    const mainToken = crypto.randomBytes(32).toString('hex');
+    terminalTokens.set(mainPort, mainToken);
     tty = new Terminal({
         role: "server",
         shell: settings.shell,
         params: settings.shellArgs || '',
         cwd: settings.cwd,
         env: cleanEnv,
-        port: settings.port || 3000
+        port: mainPort,
+        host: "127.0.0.1",
+        authToken: mainToken
     });
     signale.success(`Terminal back-end initialized!`);
     tty.onclosed = (code, signal) => {
         tty.ondisconnected = () => {};
+        terminalTokens.delete(mainPort);
         signale.complete("Terminal exited", code, signal);
         app.quit();
     };
@@ -296,18 +320,23 @@ app.on('ready', async () => {
             e.sender.send("ttyspawn-reply", "ERROR: max number of ttys reached");
         } else {
             signale.pending(`Creating new TTY process on port ${port}`);
+            const extraToken = crypto.randomBytes(32).toString('hex');
+            terminalTokens.set(Number(port), extraToken);
             let term = new Terminal({
                 role: "server",
                 shell: settings.shell,
                 params: settings.shellArgs || '',
                 cwd: tty.tty._cwd || settings.cwd,
                 env: cleanEnv,
-                port: port
+                port: port,
+                host: "127.0.0.1",
+                authToken: extraToken
             });
             signale.success(`New terminal back-end initialized at ${port}`);
             term.onclosed = (code, signal) => {
                 term.ondisconnected = () => {};
                 term.wss.close();
+                terminalTokens.delete(Number(port));
                 signale.complete(`TTY exited at ${port}`, code, signal);
                 extraTtys[term.port] = null;
                 term = null;
@@ -320,6 +349,7 @@ app.on('ready', async () => {
                 term.onclosed = () => {};
                 term.close();
                 term.wss.close();
+                terminalTokens.delete(Number(term.port));
                 extraTtys[term.port] = null;
                 term = null;
             };
