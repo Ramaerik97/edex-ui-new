@@ -38,7 +38,7 @@ It might or might not be a joke taken too seriously.
 ---
 
 <p align="center">
-  <em>Jump to: <br><a href="#features">Features</a> — <a href="#screenshots">Screenshots</a> — <a href="#qa">Questions & Answers</a> — <strong><a href="#how-do-i-get-it">Download</a></strong> — <a href="#featured-in">Featured In</a> — <a href="#useful-commands-for-the-nerds">Contributor Instructions</a> — <a href="#credits">Credits</a></em>
+  <em>Jump to: <br><a href="#features">Features</a> — <a href="#security-hardening-2024-audit">Security</a> — <a href="#screenshots">Screenshots</a> — <a href="#qa">Questions & Answers</a> — <strong><a href="#how-do-i-get-it">Download</a></strong> — <a href="#featured-in">Featured In</a> — <a href="#useful-commands-for-the-nerds">Contributor Instructions</a> — <a href="#credits">Credits</a></em>
 </p>
 
 ## Sponsor
@@ -56,6 +56,13 @@ Click the banner below and sign up to **Bytes**, the only newsletter cool enough
 - Directory viewer that follows the CWD (current working directory) of the terminal.
 - Advanced customization using themes, on-screen keyboard layouts, CSS injections. See the [wiki](https://github.com/GitSquared/edex-ui/wiki) for more info.
 - Optional sound effects made by a talented sound designer for maximum hollywood hacking vibe.
+
+## Security Hardening (2024 Audit)
+- Completed a comprehensive security review that resolved or mitigated 13 out of 16 identified issues, improving the overall security posture from low-medium to high. Read the [Security Audit report](SECURITY_AUDIT.md) for the full breakdown.
+- Terminal WebSocket traffic now requires per-session 256-bit authentication tokens, validates origins, and is bound to `127.0.0.1`, protecting against unauthorized remote connections.
+- Inter-process communication is now strictly validated with whitelisted channels, structured payload checks, and token-bucket rate limiting to prevent injection attacks and abuse (see [Security Enhancements Phase 2](SECURITY_ENHANCEMENTS_PHASE2.md)).
+- Renderer settings and filesystem operations enforce stricter input and path validation, reducing crash vectors and blocking traversal attempts into sensitive system directories.
+- Security events are captured in a rotating `security.log`, and a Content Security Policy is applied to limit external resource loading, giving operators better visibility and defense in depth.
 
 ## Screenshots
 ![Default screenshot](media/screenshot_default.png)
