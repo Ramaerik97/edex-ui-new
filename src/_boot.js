@@ -36,10 +36,79 @@ const path = require("path");
 const url = require("url");
 const fs = require("fs");
 const which = require("which");
+const crypto = require("crypto");
 const Terminal = require("./classes/terminal.class.js").Terminal;
+const SecurityLogger = require("./utils/securityLogger.js");
+
+const terminalTokens = new Map();
+const ipcRateLimitMap = new Map();
+const IPC_RATE_LIMIT = 60; // max events per 10 seconds
+const IPC_RATE_WINDOW = 10000; // 10 seconds
+
+const securityLogger = new SecurityLogger(path.join(electron.app.getPath("userData"), "logs"));
+
+function isIPCAllowed(channel) {
+    const now = Date.now();
+    let entry = ipcRateLimitMap.get(channel);
+    if (!entry) {
+        entry = {count: 1, start: now};
+        ipcRateLimitMap.set(channel, entry);
+        return true;
+    }
+    if (now - entry.start > IPC_RATE_WINDOW) {
+        entry.count = 1;
+        entry.start = now;
+        return true;
+    }
+    entry.count++;
+    ipcRateLimitMap.set(channel, entry);
+    if (entry.count > IPC_RATE_LIMIT) {
+        signale.warn(`IPC rate limit exceeded for channel ${channel}`);
+        securityLogger.rateLimitExceeded('IPC_RATE_LIMIT', {channel, count: entry.count});
+        return false;
+    }
+    return true;
+}
 
 ipc.on("log", (e, type, content) => {
-    signale[type](content);
+    if (!isIPCAllowed("log")) return;
+    const allowedLogTypes = ['fatal', 'error', 'warn', 'note', 'info', 'success', 'debug', 'pending', 'complete', 'start', 'watch'];
+    if (typeof type === 'string' && allowedLogTypes.includes(type) && typeof content === 'string') {
+        signale[type](content);
+        securityLogger.info('IPC_LOG', {type, content});
+    } else {
+        signale.warn("Invalid log IPC message received");
+        securityLogger.warn('IPC_INVALID_LOG', {type, content});
+    }
+});
+
+ipc.on("terminal-auth-token", (event, port) => {
+    if (!isIPCAllowed("terminal-auth-token")) {
+        event.returnValue = null;
+        return;
+    }
+    const token = terminalTokens.get(Number(port));
+    event.returnValue = token || null;
+});
+
+ipc.on("security-event", (event, data) => {
+    if (!data || !data.type) return;
+    switch(data.type) {
+        case 'websocket_origin_rejected':
+            securityLogger.accessDenied('WEBSOCKET_ORIGIN_REJECTED', data);
+            break;
+        case 'websocket_auth_failed':
+            securityLogger.authFailure('WEBSOCKET_AUTH_FAILED', data);
+            break;
+        case 'websocket_auth_success':
+            securityLogger.authSuccess('WEBSOCKET_AUTH_SUCCESS', data);
+            break;
+        case 'websocket_parse_error':
+            securityLogger.error('WEBSOCKET_PARSE_ERROR', data);
+            break;
+        default:
+            securityLogger.warn('UNKNOWN_SECURITY_EVENT', data);
+    }
 });
 
 var win, tty, extraTtys;
@@ -157,12 +226,12 @@ const versionHistoryPath = path.join(electron.app.getPath("userData"), "versions
 var versionHistory = fs.existsSync(versionHistoryPath) ? require(versionHistoryPath) : {};
 var version = app.getVersion();
 if (typeof versionHistory[version] === "undefined") {
-	versionHistory[version] = {
-		firstSeen: Date.now(),
-		lastSeen: Date.now()
-	};
+    versionHistory[version] = {
+        firstSeen: Date.now(),
+        lastSeen: Date.now()
+    };
 } else {
-	versionHistory[version].lastSeen = Date.now();
+    versionHistory[version].lastSeen = Date.now();
 }
 fs.writeFileSync(versionHistoryPath, JSON.stringify(versionHistory, 0, 2), {encoding:"utf-8"});
 
@@ -192,14 +261,19 @@ function createWindow(settings) {
         backgroundColor: '#000000',
         webPreferences: {
             devTools: true,
-	    enableRemoteModule: true,
+        enableRemoteModule: true,
             contextIsolation: false,
             backgroundThrottling: false,
             webSecurity: true,
             nodeIntegration: true,
             nodeIntegrationInSubFrames: false,
+            nodeIntegrationInWorker: false,
             allowRunningInsecureContent: false,
-            experimentalFeatures: settings.experimentalFeatures || false
+            experimentalFeatures: settings.experimentalFeatures || false,
+            sandbox: false,
+            enableWebSQL: false,
+            safeDialogs: true,
+            safeDialogsMessage: "Prevented multiple dialogs"
         }
     });
 
@@ -208,6 +282,25 @@ function createWindow(settings) {
         protocol: 'file:',
         slashes: true
     }));
+
+    const contentSecurityPolicy = [
+        "default-src 'self' 'unsafe-inline' 'unsafe-eval' ws://localhost:* ws://127.0.0.1:* file:",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: file:",
+        "connect-src 'self' ws://localhost:* ws://127.0.0.1:* https://myexternalip.com https://api.github.com",
+        "font-src 'self' data:",
+        "media-src 'self' file:"
+    ].join('; ');
+
+    win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+        callback({
+            responseHeaders: {
+                ...details.responseHeaders,
+                'Content-Security-Policy': [contentSecurityPolicy]
+            }
+        });
+    });
 
     signale.complete("Frontend window created!");
     win.show();
@@ -240,18 +333,25 @@ app.on('ready', async () => {
         TERM_PROGRAM_VERSION: app.getVersion()
     }, settings.env);
 
-    signale.pending(`Creating new terminal process on port ${settings.port || '3000'}`);
+    const mainPort = Number(settings.port) || 3000;
+    signale.pending(`Creating new terminal process on port ${mainPort}`);
+    const mainToken = crypto.randomBytes(32).toString('hex');
+    terminalTokens.set(mainPort, mainToken);
     tty = new Terminal({
         role: "server",
         shell: settings.shell,
         params: settings.shellArgs || '',
         cwd: settings.cwd,
         env: cleanEnv,
-        port: settings.port || 3000
+        port: mainPort,
+        host: "127.0.0.1",
+        authToken: mainToken,
+        logger: securityLogger
     });
     signale.success(`Terminal back-end initialized!`);
     tty.onclosed = (code, signal) => {
         tty.ondisconnected = () => {};
+        terminalTokens.delete(mainPort);
         signale.complete("Terminal exited", code, signal);
         app.quit();
     };
@@ -296,18 +396,24 @@ app.on('ready', async () => {
             e.sender.send("ttyspawn-reply", "ERROR: max number of ttys reached");
         } else {
             signale.pending(`Creating new TTY process on port ${port}`);
+            const extraToken = crypto.randomBytes(32).toString('hex');
+            terminalTokens.set(Number(port), extraToken);
             let term = new Terminal({
                 role: "server",
                 shell: settings.shell,
                 params: settings.shellArgs || '',
                 cwd: tty.tty._cwd || settings.cwd,
                 env: cleanEnv,
-                port: port
+                port: port,
+                host: "127.0.0.1",
+                authToken: extraToken,
+                logger: securityLogger
             });
             signale.success(`New terminal back-end initialized at ${port}`);
             term.onclosed = (code, signal) => {
                 term.ondisconnected = () => {};
                 term.wss.close();
+                terminalTokens.delete(Number(port));
                 signale.complete(`TTY exited at ${port}`, code, signal);
                 extraTtys[term.port] = null;
                 term = null;
@@ -320,6 +426,7 @@ app.on('ready', async () => {
                 term.onclosed = () => {};
                 term.close();
                 term.wss.close();
+                terminalTokens.delete(Number(term.port));
                 extraTtys[term.port] = null;
                 term = null;
             };
