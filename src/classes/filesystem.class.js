@@ -4,11 +4,13 @@ class FilesystemDisplay {
 
         const fs = require("fs");
         const path = require("path");
+        const pathValidator = require("../utils/pathValidator.js");
         this.cwd = [];
         this.cwd_path = null;
         this.iconcolor = `rgb(${window.theme.r}, ${window.theme.g}, ${window.theme.b})`;
         this._formatBytes = (a,b) => {if(0==a)return"0 Bytes";var c=1024,d=b||2,e=["Bytes","KB","MB","GB","TB","PB","EB","ZB","YB"],f=Math.floor(Math.log(a)/Math.log(c));return parseFloat((a/Math.pow(c,f)).toFixed(d))+" "+e[f]};
         this.fileIconsMatcher = require("./assets/misc/file-icons-match.js");
+        this.pathValidator = pathValidator;
         this.icons = require("./assets/icons/file-icons.json");
         this.edexIcons = {
             theme: {
@@ -162,7 +164,14 @@ class FilesystemDisplay {
             }
 
             if (process.platform === "win32" && dir.endsWith(":")) dir = dir+"\\";
-            let tcwd = dir;
+            const sanitizedDir = this.pathValidator.sanitizePath(dir);
+            if (!sanitizedDir) {
+                console.warn("FilesystemDisplay: blocked unsafe path", dir);
+                this.setFailedState();
+                this._reading = false;
+                return false;
+            }
+            let tcwd = sanitizedDir;
             let content = await this._asyncFSwrapper.readdir(tcwd).catch(err => {
                 console.warn(err);
                 if (this._noTracking === true && this.dirpath) { // #262

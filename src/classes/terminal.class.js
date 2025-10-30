@@ -315,6 +315,7 @@ class Terminal {
             this.port = opts.port || 3000;
             this.host = opts.host || "127.0.0.1";
             this.authToken = opts.authToken || null;
+            this.logger = opts.logger || null;
             this._clientConnected = false;
 
             this._closed = false;
@@ -439,6 +440,11 @@ class Terminal {
                     const origin = info.origin || info.req.headers.origin;
                     if (origin && !origin.includes('localhost') && !origin.includes('127.0.0.1') && !origin.startsWith('file://')) {
                         console.error('WebSocket connection rejected from origin:', origin);
+                        this.Ipc.send('security-event', {
+                            type: 'websocket_origin_rejected',
+                            port: this.port,
+                            origin: origin
+                        });
                         return false;
                     }
                     if (this.authToken) {
@@ -447,13 +453,26 @@ class Terminal {
                             const token = url.searchParams.get('token');
                             if (token !== this.authToken) {
                                 console.error('WebSocket connection rejected: invalid auth token');
+                                this.Ipc.send('security-event', {
+                                    type: 'websocket_auth_failed',
+                                    port: this.port
+                                });
                                 return false;
                             }
                         } catch (e) {
                             console.error('WebSocket URL parse error:', e);
+                            this.Ipc.send('security-event', {
+                                type: 'websocket_parse_error',
+                                port: this.port,
+                                error: e.message
+                            });
                             return false;
                         }
                     }
+                    this.Ipc.send('security-event', {
+                        type: 'websocket_auth_success',
+                        port: this.port
+                    });
                     return true;
                 }
             });

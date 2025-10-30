@@ -38,21 +38,77 @@ const fs = require("fs");
 const which = require("which");
 const crypto = require("crypto");
 const Terminal = require("./classes/terminal.class.js").Terminal;
+const SecurityLogger = require("./utils/securityLogger.js");
 
 const terminalTokens = new Map();
+const ipcRateLimitMap = new Map();
+const IPC_RATE_LIMIT = 60; // max events per 10 seconds
+const IPC_RATE_WINDOW = 10000; // 10 seconds
+
+const securityLogger = new SecurityLogger(path.join(electron.app.getPath("userData"), "logs"));
+
+function isIPCAllowed(channel) {
+    const now = Date.now();
+    let entry = ipcRateLimitMap.get(channel);
+    if (!entry) {
+        entry = {count: 1, start: now};
+        ipcRateLimitMap.set(channel, entry);
+        return true;
+    }
+    if (now - entry.start > IPC_RATE_WINDOW) {
+        entry.count = 1;
+        entry.start = now;
+        return true;
+    }
+    entry.count++;
+    ipcRateLimitMap.set(channel, entry);
+    if (entry.count > IPC_RATE_LIMIT) {
+        signale.warn(`IPC rate limit exceeded for channel ${channel}`);
+        securityLogger.rateLimitExceeded('IPC_RATE_LIMIT', {channel, count: entry.count});
+        return false;
+    }
+    return true;
+}
 
 ipc.on("log", (e, type, content) => {
+    if (!isIPCAllowed("log")) return;
     const allowedLogTypes = ['fatal', 'error', 'warn', 'note', 'info', 'success', 'debug', 'pending', 'complete', 'start', 'watch'];
     if (typeof type === 'string' && allowedLogTypes.includes(type) && typeof content === 'string') {
         signale[type](content);
+        securityLogger.info('IPC_LOG', {type, content});
     } else {
         signale.warn("Invalid log IPC message received");
+        securityLogger.warn('IPC_INVALID_LOG', {type, content});
     }
 });
 
 ipc.on("terminal-auth-token", (event, port) => {
+    if (!isIPCAllowed("terminal-auth-token")) {
+        event.returnValue = null;
+        return;
+    }
     const token = terminalTokens.get(Number(port));
     event.returnValue = token || null;
+});
+
+ipc.on("security-event", (event, data) => {
+    if (!data || !data.type) return;
+    switch(data.type) {
+        case 'websocket_origin_rejected':
+            securityLogger.accessDenied('WEBSOCKET_ORIGIN_REJECTED', data);
+            break;
+        case 'websocket_auth_failed':
+            securityLogger.authFailure('WEBSOCKET_AUTH_FAILED', data);
+            break;
+        case 'websocket_auth_success':
+            securityLogger.authSuccess('WEBSOCKET_AUTH_SUCCESS', data);
+            break;
+        case 'websocket_parse_error':
+            securityLogger.error('WEBSOCKET_PARSE_ERROR', data);
+            break;
+        default:
+            securityLogger.warn('UNKNOWN_SECURITY_EVENT', data);
+    }
 });
 
 var win, tty, extraTtys;
@@ -227,6 +283,25 @@ function createWindow(settings) {
         slashes: true
     }));
 
+    const contentSecurityPolicy = [
+        "default-src 'self' 'unsafe-inline' 'unsafe-eval' ws://localhost:* ws://127.0.0.1:* file:",
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: file:",
+        "connect-src 'self' ws://localhost:* ws://127.0.0.1:* https://myexternalip.com https://api.github.com",
+        "font-src 'self' data:",
+        "media-src 'self' file:"
+    ].join('; ');
+
+    win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+        callback({
+            responseHeaders: {
+                ...details.responseHeaders,
+                'Content-Security-Policy': [contentSecurityPolicy]
+            }
+        });
+    });
+
     signale.complete("Frontend window created!");
     win.show();
     if (!settings.allowWindowed) {
@@ -270,7 +345,8 @@ app.on('ready', async () => {
         env: cleanEnv,
         port: mainPort,
         host: "127.0.0.1",
-        authToken: mainToken
+        authToken: mainToken,
+        logger: securityLogger
     });
     signale.success(`Terminal back-end initialized!`);
     tty.onclosed = (code, signal) => {
@@ -330,7 +406,8 @@ app.on('ready', async () => {
                 env: cleanEnv,
                 port: port,
                 host: "127.0.0.1",
-                authToken: extraToken
+                authToken: extraToken,
+                logger: securityLogger
             });
             signale.success(`New terminal back-end initialized at ${port}`);
             term.onclosed = (code, signal) => {
